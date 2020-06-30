@@ -4,8 +4,11 @@ import inspect
 import logging
 import os
 from typing import Callable
+from urllib import parse
 
 from aiohttp import web
+
+from www.apis import APIError
 
 
 def get(path):
@@ -96,11 +99,61 @@ class RequestHandler:
     def __init__(self, app, fn):
         self._app = app
         self._func = fn
+        self._has_request_arg = has_request_arg(fn)
+        self._has_var_kw_arg = has_var_kw_arg(fn)
+        self._has_named_kw_arg = get_named_kw_args(fn)
+        self._named_kw_args = get_named_kw_args(fn)
+        self._required_kw_args = get_required_kw_args(fn)
 
-    async def __call__(self, request):
-        kwargs = ...
-        r = await self._func(**kwargs)
-        return r
+    async def __call__(self, request: web.Request):
+        kwargs = None
+        if self._has_var_kw_arg or self._has_named_kw_arg or self._required_kw_args:
+            if request.method == 'POST':
+                if not request.content_type:
+                    return web.HTTPBadRequest(body='Missing Content-Type')
+                ct = request.content_type.lower()
+                if ct.startswith('application/json'):
+                    params = await request.json()
+                    if not isinstance(params, dict):
+                        return web.HTTPBadRequest(body='JSON body must be object')
+                    kwargs = params
+                elif ct.startswith('application/x-www-form-urlencoded') or ct.startswith('multipart/form-data'):
+                    params = await request.post()
+                    kwargs = dict(**params)
+                else:
+                    return web.HTTPBadRequest(body='Unsupported Content-Type: %s' % request.content_type)
+            if request.method == 'GET':
+                qs = request.query_string
+                if qs:
+                    kwargs = dict()
+                    for k, v in parse.parse_qs(qs, True).items():
+                        kwargs[k] = v[0]
+        if kwargs is None:
+            kwargs = dict(**request.match_info)
+        else:
+            if not self._has_var_kw_arg and self._named_kw_args:
+                # 移除所有未命名参数
+                copy = dict()
+                for name in self._named_kw_args:
+                    if name in kwargs:
+                        copy[name] = kwargs[name]
+                kwargs = copy
+            for k, v in request.match_info.items():
+                if k in kwargs:
+                    logging.warning(f'Duplicate arg name in named arg an kw args: {k}')
+                kwargs[k] = v
+        if self._has_request_arg:
+            kwargs['request'] = request
+        if self._required_kw_args:
+            for name in self._required_kw_args:
+                if name not in kwargs:
+                    return web.HTTPBadRequest(body=f'Missing argument: {name}')
+        logging.info(f'call with args: {kwargs}')
+        try:
+            r = await self._func(**kwargs)
+            return r
+        except APIError as e:
+            return dict(error=e.error, data=e.data, message=e.message)
 
 
 def add_static(app):

@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 
 from www import orm
 from www.models import User
@@ -11,5 +12,7 @@ async def test(loop):
 
 
 if __name__ == '__main__':
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(test(loop))
+    # loop = asyncio.get_event_loop()
+    # loop.run_until_complete(test(loop))
+    r = inspect.signature(test)
+    print(r)
